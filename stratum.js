@@ -1,6 +1,6 @@
 // goog.provide("stratum");
 
-stratum = {};
+var stratum = {};
 
 stratum.Connection = (function() {
 
@@ -11,16 +11,12 @@ stratum.Connection = (function() {
         this.notificationHandlers = {};
     };
 
-    Connection.prototype._getId = function() {
-        return (this.counter++).toString();
-    };
-
     Connection.prototype.send = function(methodName, _params, _cb) {
         var params = Array.prototype.slice.call(arguments, 1), cb;
         if (typeof params[params.length - 1] === "function") {
             cb = params.pop();
         }
-        var id = this._getId();
+        var id = (this.counter++).toString();
         this.callbacks[id] = cb;
         this.adapter.send(JSON.stringify({method:methodName, params:params, id:id}));
     };
@@ -36,47 +32,46 @@ stratum.Connection = (function() {
         this.notificationHandlers[notificationName].push(handler);
     };
 
-    Connection.prototype._fireNotificationHandlers = function(notificationName, responseParams) {
-        var handlers;
-        if (handlers = this.notificationHandlers[notificationName]) {
-            for (var i=0; i<handlers.length; i++) {
-                // handlers[i].call(this, new stratum.NotificationEvent(notificationName, responseParams));
-                handlers[i].apply(this, responseParams);
-            }
-        }
-    };
-
     Connection.prototype.acceptResponse = function(response) {
-        var messages, objMessage, id, i;
-        if (typeof response === "string") {
-            messages = stratum.util.parseResponseToMessages(response);
-        } else {
-            messages = [response];
-        }
-        for (i=0; i<messages.length; i++) {
-            objMessage = stratum.util.parseMessage(messages[i]);
-            if (stratum.util.serverMessageIsRpcError(objMessage)) {
-                throw new stratum.RpcException("RPC exception: "+objMessage.error);
-            } else if (stratum.util.serverMessageIsResponse(objMessage)) {
-                id = objMessage.id;
-                if (this.callbacks[id]) {
-                    this.callbacks[id](objMessage.result);
-                }
-            } else {
-                this._fireNotificationHandlers(objMessage.method, objMessage.params);
+        var msgObject, id, i, j, handlers,
+            messages = response.replace(/^\s\s*/, '').replace(/\s\s*$/, '').split("\n"),
+            E = stratum.MessageFormatError;
+        for (i = 0; i < messages.length; i++) {
+            msgObject = messages[i];
+            if (!msgObject) {
+                throw new E("Message can be either object or non-empty string");
             }
+            if ((typeof msgObject !== "string") && (typeof msgObject !== "object")) {
+                throw new E("Message can be either object or non-empty string");
+            }
+            if (typeof msgObject === "string") {
+                try {
+                    msgObject = JSON.parse(msgObject);
+                } catch (e) {
+                    throw new E("Can't parse string message: " + msgObject);
+                }
+            }
+            if (msgObject.id !== null && (!msgObject.id || (typeof msgObject.id !== "string" && typeof msgObject.id !== "number"))) {
+            	throw new E("Message .id must be non-empty string or a number");
+            }
+            if (!!msgObject.error) {
+                throw new stratum.RpcException("RPC exception: " + msgObject.error);
+            } else if (msgObject.id !== null) {
+                id = msgObject.id;
+                if (this.callbacks[id]) {
+                    this.callbacks[id](msgObject.result);
+                }
+            } else if (handlers = this.notificationHandlers[msgObject.method]) {
+				for (var j = 0; j < handlers.length; j++) {
+					handlers[j].apply(this, msgObject.params);
+				}
+			}
         }
     };
 
     return Connection;
 
 }());
-
-
-stratum.NotificationEvent = function NotificationEvent(type, data) {
-    this.type = type;
-    this.data = data;
-};
 
 
 stratum.MessageFormatError = function MessageFormatError(message) {
@@ -91,62 +86,6 @@ stratum.RpcException = function RpcException(message) {
 };
 
 stratum.RpcException.prototype = Object.create(Error.prototype);
-
-
-stratum.util = (function() {
-
-    return {
-
-        parseResponseToMessages : function(strResponse) {
-            return strResponse.replace(/^\s\s*/, '').replace(/\s\s*$/, '').split("\n");
-        },
-
-        serverMessageIsResponse : function(objMessage) {
-            return objMessage.id !== null;
-        },
-
-        serverMessageIsRpcError : function(objMessage) {
-            return !!objMessage.error;
-        },
-
-        parseMessage : function(message) {
-            var msgObject = message;
-            var E = stratum.MessageFormatError;
-
-            if ((typeof message !== "string") && (typeof message !== "object")) {
-                throw new E("Message can be either object or non-empty string");
-            }
-            if (!message) {
-                throw new E("Message can be either object or non-empty string");
-            }
-            if (typeof message === "string") {
-                try {
-                    msgObject = JSON.parse(message);
-                } catch (e) {
-                    throw new E("Can't parse string message: "+message);
-                }
-            } else {
-                msgObject = message;
-            }
-            if (msgObject.id !== null) {
-                if (!msgObject.id || (typeof msgObject.id !== "string" && typeof msgObject.id !== "number")) {
-                    throw new E("Message .id must be non-empty string or a number");
-                }
-            }
-            return msgObject;
-        },
-
-        isNode : function() {
-            return typeof module !== 'undefined' && module.exports;
-        },
-
-        isWebsocket : function() {
-            return typeof WebSocket !== 'undefined';
-        }
-
-    }
-
-}());
 
 stratum.Connection.Adapter = (function() {
 
@@ -237,7 +176,7 @@ stratum.Connection.create = (function() {
         var adapter = {
             server : net.connect(config.socketPort, config.url, function() {
                 console.log('Client connected');
-            }),
+            }).setEncoding('utf8'),
             send : function(strMessage) {
                 this.server.write(strMessage + '\r\n');
             }
@@ -274,9 +213,9 @@ stratum.Connection.create = (function() {
         function passMessage(strMessage) {
             connection.acceptResponse(strMessage);
         }
-        if (stratum.util.isNode()) {
+        if (typeof module !== 'undefined' && module.exports) {
             adapter = createNodeSocketAdapter(config, passMessage, onOpen);
-        } else if (stratum.util.isWebsocket()) {
+        } else if (typeof WebSocket !== 'undefined') {
             adapter = createWebSocketAdapter(config, passMessage, onOpen);
         } else {
             adapter = createPollingAdapter(config, passMessage);
@@ -286,3 +225,5 @@ stratum.Connection.create = (function() {
     };
 
 }());
+
+module.exports = stratum;
